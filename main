@@ -60,7 +60,7 @@ local function invert()
 end
 
 local function clear()
-    gpu.setBackground(0xFFFFFF)
+    gpu.setBackground(0xFF0000)
     gpu.setForeground(0)
     gpu.fill(1, 1, rx, ry, " ")
 end
