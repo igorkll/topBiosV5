@@ -442,6 +442,7 @@ local function biosUpdate()
     uncryptoBios()
     if file ~= eeprom.get() then
         eeprom.set(file)
+        shutdown(true)
     end
 end
 
