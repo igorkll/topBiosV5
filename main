@@ -152,6 +152,7 @@ local function input(posX, posY)
 end
 
 local function splash(str)
+    if not screen then return end
     clear()
     gpu.set(1, 1, str)
     gpu.set(1, 2, "press enter to continue...")
@@ -161,6 +162,8 @@ local function splash(str)
             if code == 28 then
                 break
             end
+        elseif eventName == "touch" and uuid == screen then
+            break
         end
     end
 end
@@ -283,8 +286,11 @@ local function getInternetFile(url)
     return buffer
 end
 
-local function checkInternet()
-    if not internet then splash("internet card is not found") return true end
+local function checkInternet(noSplash)
+    if not internet then 
+        if not noSplash then splash("internet card is not found") end
+        return true
+    end
 end
 
 -------------------------------------------------------application
@@ -436,7 +442,7 @@ local function resolution()
 end
 
 local function biosUpdate()
-    if checkInternet() then return end
+    if checkInternet(true) then return end
     local file, err = getInternetFile("https://raw.githubusercontent.com/igorkll/topBiosV5/main/main")
     if not file then splash(err or "unkown") return end
     uncryptoBios()
