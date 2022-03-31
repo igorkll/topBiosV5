@@ -1,0 +1,970 @@
+local function getDeviceLevel(address)
+    return tonumber(computer.getDeviceInfo()[address].width) or math.huge
+end
+
+local function getComponent(ctype)
+    local maxlevel = 0
+    local deviceaddress = nil
+    local finded = false
+
+    while true do
+        finded = false
+        for address, ltype in component.list(ctype) do
+            if ctype == ltype then
+                local level = getDeviceLevel(address)
+                if level > maxlevel then
+                    maxlevel = level
+                    deviceaddress = address
+                    finded = true
+                    break
+                end
+            end
+        end
+        if not finded then
+            return component.proxy(deviceaddress or "")
+        end
+    end
+end
+
+local eeprom = getComponent("eeprom")
+local eeprom_address = eeprom.address
+local internet = getComponent("internet")
+local componentBeep = getComponent("beep")
+
+-------------------------------------------------------guard
+
+local originalInvoke = component.invoke
+computer.setArchitecture = nil
+local ssub, table_concat, component, error, xpcall, assert, shutdown, checkArg, pairs, type, unpack, traceback = string.sub, table.concat, component, error, xpcall, assert, computer.shutdown, checkArg, pairs, type, table.unpack, debug.traceback
+local eepromFakeFunctions = {makeReadonly = false, get = "", set = {nil, "storage is readonly"}, setData = {nil, "storage is readonly"}, getData = "", getChecksum = ""}
+local function fakeInvoke(address, name, ...)
+    checkArg(1, address, "string")
+    checkArg(2, name, "string")
+    if address == eeprom.address then
+        for key, value in pairs(eepromFakeFunctions) do
+            if key == name then
+                local valuetype = type(value)
+                if valuetype == "table" then
+                    return unpack(value)
+                elseif valuetype == "function" then
+                    return value(...)
+                else
+                    return value                    
+                end
+            end
+        end
+        return originalInvoke(address, name, ...)
+    else
+        return originalInvoke(address, name, ...)
+    end
+end
+
+local function cryptoBios() component.invoke = fakeInvoke end
+local function uncryptoBios() component.invoke = originalInvoke end
+
+-------------------------------------------------------functions
+
+local function delay(time)
+    local inTime = computer.uptime()
+    while computer.uptime() - inTime < time do
+        computer.pullSignal(0.01)
+    end
+end
+
+local bootState, status = false
+
+local function optimizeBeep(freq, delay)
+    if componentBeep then
+        componentBeep.beep({[freq] = delay})
+    else
+        computer.beep(freq, delay)
+    end
+end
+
+local soundAllow
+local function sound(num)
+    if bootState or not soundAllow then return end
+    if num == 0 then
+        computer.beep(1600, 0.1)
+        computer.beep(1400, 0.1)
+        delay(0.05)
+        computer.beep(1400, 0.1)
+        optimizeBeep(1600, 0.1)
+    elseif num == 1 then
+        optimizeBeep(1000, 0.2)
+    elseif num == 2 then
+        computer.beep(1333, 0.05)
+        optimizeBeep(1333, 0.05)
+    elseif num == 3 then
+        optimizeBeep(2000, 0.01)
+    end
+end
+
+local function split(str, sep)
+    local parts, count = {}, 1
+    for i = 1, #str do
+        local char = ssub(str, i, i)
+        if not parts[count] then parts[count] = "" end
+        if char == sep then
+            count = count + 1
+        else
+            parts[count] = parts[count] .. char
+        end
+    end
+    return parts
+end
+
+local function writeSplash()
+    status("writing to eeprom")
+    sound(2)
+end
+
+local function eeprom_getData()
+    return originalInvoke(eeprom_address, "getData")
+end
+
+local function eeprom_setData(data)
+    originalInvoke(eeprom_address, "setData", data)
+end
+
+local function getDataPart(part)
+    return split(eeprom_getData(), "\n")[part] or ""
+end
+
+local function setDataPart(part, newdata, doNotSplash)
+    if not bootState and not doNotSplash then writeSplash() end
+    if newdata:find("\n") then error("\\n char") end
+    parts = split(eeprom_getData(), "\n")
+    for i = part, 1, -1 do
+        if not parts[i] then parts[i] = "" end
+    end
+    parts[part] = newdata
+    eeprom_setData(table_concat(parts, "\n"))
+end
+
+soundAllow = getDataPart(11) ~= "0"
+
+-------------------------------------------------------graphics init
+
+local gpu = getComponent("gpu")
+local screen
+local keyboard
+local rx, ry, depth
+local function noControl() gpu = {} setmetatable(gpu, {__index = function() error("gpu and screen required") end}) end
+if not gpu then 
+    noControl()
+else
+    if not component.proxy(getDataPart(10)) then
+        setDataPart(10, getComponent("screen").address, true)
+    end
+    screen = getDataPart(10)
+    if screen then
+        gpu.bind(screen)
+        rx, ry = gpu.getResolution()
+        depth = gpu.getDepth()
+        keyboard = originalInvoke(screen, "getKeyboards")[1]
+    else
+        noControl()
+    end
+end
+
+-------------------------------------------------------functions
+
+local function isColor()
+    return depth ~= 1
+end
+
+local function optimizeColor(color, simpleColor, bf)
+    if not simpleColor then simpleColor = color end
+    if depth ~= 1 then
+        if depth == 4 then
+            return simpleColor
+        else
+            return color
+        end
+    else
+        return (bf and 0xFFFFFF) or 0
+    end
+end
+
+-------------------------------------------------------graphics
+
+local function invert()
+    gpu.setForeground(gpu.setBackground(gpu.getForeground()))
+end
+
+local function fill()
+    gpu.fill(1, 1, rx, ry, " ")
+end
+
+local function setColor(back, fore)
+    gpu.setBackground(back or 0xFFFFFF)
+    gpu.setForeground(fore or 0)
+end
+
+local function clear(back, fore)
+    setColor(back, fore)
+    fill()
+end
+
+local function setText(text, posY)
+    gpu.set(math.ceil((rx / 2) - (unicode.len(text) / 2)), posY, text)
+end
+
+local function menu(label, strs, num)
+    local select = num or 1
+    local posY = ((ry // 2) - (#strs // 2) - 1)
+    if posY < 0 then posY = 0 end
+    while true do
+        clear()
+        local startpos = (select // ry) * ry
+        local dy = posY
+        if startpos == 0 then
+            if not isColor() then invert() end
+            setText(label, 1 + dy)
+            if not isColor() then invert() end
+        else
+            dy = 0
+        end
+        setColor(nil, optimizeColor(0x888888, 0xAAAAAA, false))
+        for i = 1, #strs do
+            local pos = (i + 1 + dy) - startpos
+            if pos >= 1 and pos <= ry then
+                if keyboard and select == i then invert() end
+                setText(strs[i], pos)
+                if keyboard and select == i then invert() end
+            end
+        end
+        ::noReDraw::
+        local isEvent = false
+        local eventName, uuid, posX, code, button = computer.pullSignal()
+        if eventName == "key_down" and uuid == keyboard then
+            if code == 200 and select > 1 then
+                select = select - 1
+                isEvent = true
+            end
+            if code == 208 and select < #strs then
+                select = select + 1
+                isEvent = true
+            end
+            if code == 28 then
+                sound(3)
+                return select
+            end
+        elseif eventName == "touch" and uuid == screen and button == 0 then
+            code = (code + startpos) - dy
+            code = code - 1
+            if code >= 1 and code <= #strs then
+                local text = strs[code]
+                local start, textEnd = math.ceil((rx / 2) - (unicode.len(text) / 2))
+                textEnd = start + (unicode.len(text) - 1)
+                if posX >= start and posX <= textEnd then
+                    sound(3)
+                    return code
+                end
+            end
+        elseif eventName == "scroll" and uuid == screen then
+            if button == 1 and select > 1 then
+                select = select - 1
+                isEvent = true
+            end
+            if button == -1 and select < #strs then
+                select = select + 1
+                isEvent = true
+            end
+        end
+        if not isEvent then
+            goto noReDraw
+        else
+            sound(3)
+        end
+    end
+end
+
+local function menuPro(label, strs, utiles, args, num)
+    strs[#strs + 1] = "back" --да я знаю что так нельзя, что таблица ссылачьный тип, бла бла бла даже слышать не хочу
+    local num = num or 1
+    while true do
+        num = menu(label, strs, num)
+        if num == #strs then return end
+        local arg = {}
+        if args and args[num] then arg = args[num] end
+        utiles[num](table.unpack(arg))
+    end
+end
+
+local function yesno(label, simple, state)
+    if simple then
+        return menu(label, {"no", "yes"}, (state and 2) or 1) == 2
+    else
+        return menu(label, {"no", "no", "yes", "no"}, (state and 3) or 1) == 3
+    end
+end
+
+local function waitFoTouch(posY)
+    gpu.set(1, posY, "press enter or touch to continue...")
+    while true do
+        local eventName, uuid, _, code = computer.pullSignal()
+        if eventName == "key_down" and uuid == keyboard then
+            if code == 28 then
+                break
+            end
+        elseif eventName == "touch" and uuid == screen then
+            break
+        end
+    end
+    sound(3)
+end
+
+local function splash(str)
+    if not screen then return end
+    clear()
+    gpu.set(1, 1, str)
+    waitFoTouch(2)
+end
+
+function status(str, delayTime)
+    if not screen then return end
+    clear()
+    setText(str, ry // 2)
+    if delayTime then delay(delayTime) end
+end
+
+local function input(posX, posY, crypto)
+    if not keyboard then
+        splash("keyboard is not found, touch to cancel input")
+        return ""
+    end
+    local buffer = ""
+    while true do
+        gpu.set(posX, posY, "_")
+        local eventName, uuid, char, code = computer.pullSignal(1)
+        if eventName == "key_down" and uuid == keyboard then
+            if code == 28 then
+                sound(3)
+                return buffer
+            elseif code == 14 then
+                if unicode.len(buffer) > 0 then
+                    buffer = unicode.sub(buffer, 1, unicode.len(buffer) - 1)
+                    gpu.set(posX, posY, " ")
+                    posX = posX - 1
+                    gpu.set(posX, posY, " ")
+                    sound(3)
+                end
+            elseif char ~= 0 then
+                buffer = buffer .. unicode.char(char)
+                gpu.set(posX, posY, (crypto and "*") or unicode.char(char))
+                posX = posX + 1
+                sound(3)
+            end
+        elseif eventName == "clipboard" and uuid == keyboard then
+            buffer = buffer .. char
+            gpu.set(posX, posY, char)
+            posX = posX + unicode.len(char)
+            if unicode.sub(char, unicode.len(char), unicode.len(char)) == "\n" then
+                sound(3)
+                return unicode.sub(buffer, 1, unicode.len(buffer) - 1)
+            end
+        elseif eventName == "touch" and uuid == screen then
+            if #buffer == 0 then return "" end
+        end
+    end
+end
+
+local function inputZone(text, crypto)
+    clear()
+    gpu.set(1, 1, text..": ")
+    return input(unicode.len(text) + 3, 1, crypto)
+end
+
+local function garbage_collect()
+    status("garbage collection")
+    for i = 1, 10 do computer.pullSignal(0.1) end
+end
+
+-------------------------------------------------------functions
+
+local function miniStr(uuid)
+    if not uuid then return nil end
+    return uuid:sub(1, 6)
+end
+
+local function getFile(fs, path)
+    local file, err = fs.open(path)
+    if not file then return nil, err end
+    local buffer = ""
+    while true do
+        local read = fs.read(file, math.huge)
+        if not read then break end
+        buffer = buffer .. read
+    end
+    fs.close(file)
+    return buffer
+end
+
+local function saveFile(fs, path, data)
+    local file, err = fs.open(path, "w")
+    if not file then return nil, err end
+    fs.write(file, data)
+    fs.close(file)
+    return true
+end
+
+local function isBootFs(address)
+    local proxy = component.proxy(address)
+    return proxy.exists("/init.lua") or proxy.exists("/OS.lua")
+end
+
+local function selectfs(label, uuid, clearAllow, bottableOnly, isClear)
+    local data = {n = {}, a = {}}
+    for address in component.list("filesystem") do
+        if not bottableOnly or isBootFs(address) then
+            data.n[#data.n + 1] = table.concat({miniStr(address), component.proxy(address).getLabel()}, ":")
+            data.a[#data.a + 1] = address
+        end
+    end
+    if clearAllow then data.n[#data.n + 1] = "clear" end
+    data.n[#data.n + 1] = "back"
+    local num = 1
+    if not isClear then
+        if type(uuid) == "number" then
+            num = uuid
+        elseif type(uuid) == "string" then
+            for i = 1, #data.a do 
+                if data.a[i] == uuid then
+                    num = i
+                    break
+                end
+            end
+        end
+    else
+        num = #data.n - 1
+    end
+    local select = menu(label, data.n, num)
+    local address = data.a[select]
+    if not address then
+        if select == #data.n then
+            return nil
+        elseif select == (#data.n - 1) then
+            return false
+        end
+    end
+    return address
+end
+
+--[[
+local function originalResolution()
+    if screen then
+        rx, ry = gpu.maxResolution()
+        gpu.setResolution(rx, ry)
+    end
+end
+]]
+
+local function bootTo(address)
+    local fs, data = component.proxy(address)
+    if fs.exists("/init.lua") then
+        computer.getBootAddress = function() return address end
+        computer.setBootAddress = function(address) pcall(setDataPart, 1, address) cryptoBios() end
+        data = getFile(fs, "/init.lua")
+    elseif fs.exists("/OS.lua") then
+        eepromFakeFunctions.getData = address
+        eepromFakeFunctions.setData = function(address) pcall(setDataPart, 1, address) cryptoBios() end
+        data = getFile(fs, "/OS.lua")
+    else
+        error("boot file not found")
+    end
+    computer.getBootScreen = function() return screen end
+    cryptoBios()
+    garbage_collect()
+    --originalResolution()
+    status("boot to drive: " .. miniStr(address) .. "...")
+    sound(1)
+    bootState = true
+    assert(xpcall(assert(load(data, "=init")), traceback))
+    shutdown()
+end
+
+local function setResolution()
+    if screen then
+        local cx = tonumber(getDataPart(2))
+        local cy = tonumber(getDataPart(3))
+        if cx and cy and pcall(gpu.setResolution, cx, cy) then
+            rx, ry = cx, cy
+        else
+            rx, ry = gpu.maxResolution()
+            gpu.setResolution(rx, ry)
+        end
+    end
+end
+setResolution()
+
+local function getInternetFile(url)
+    if not internet then return nil, "internet card is not found" end
+    local handle, data, result, reason = internet.request(url), ""
+    if handle then
+        while true do
+            result, reason = handle.read(mathHuge)	
+            if result then
+                data = data .. result
+            else
+                handle.close()
+                
+                if reason then
+                    return nil, reason
+                else
+                    return data
+                end
+            end
+        end
+    else
+        return nil, "unvalid address"
+    end
+end
+
+local function checkInternet(noSplash)
+    if not internet then 
+        if not noSplash then splash("internet card is not found") end
+        return true
+    end
+end
+
+local function checkPassword(text)
+    local data = getDataPart(8)
+    if data == "" then return true end
+    local userInput = inputZone("password" .. ((text and (" to " .. text)) or ""), true)
+    if userInput == "" then return nil end
+    return data == userInput
+end
+
+local function isControl()
+    return screen and (keyboard or (math.floor(computer.getDeviceInfo()[screen].width) ~= 1))
+end
+
+local function setMonitor(address)
+    setDataPart(10, address)
+    clear(0, 0)
+    screen = address
+    gpu.bind(address)
+    setResolution()
+    clear(0, 0)
+    keyboard = originalInvoke(address, "getKeyboards")[1]
+    depth = gpu.getDepth()
+end
+
+-------------------------------------------------------init
+
+if getDataPart(4) == "true" then
+    eepromFakeFunctions = {}
+end
+
+-------------------------------------------------------application
+
+local function selectbootdevice()
+    local isClear
+    while true do
+        local address = selectfs("select", getDataPart(1), true, true, isClear)
+        isClear = nil
+        if address then
+            setDataPart(1, address)
+        elseif address == false then
+            setDataPart(1, "")
+            isClear = true
+        else
+            return
+        end
+    end
+end
+
+local function fastboot()
+    local address = selectfs("fastboot", nil, nil, true)
+    if address then
+        bootTo(address)
+    end
+end
+
+local function internetBoot(mainUrl, decrypto)
+    if checkInternet() then return end
+    local url = mainUrl
+    if not url then
+        url = inputZone("url")
+        if url == "" then return end
+    end
+    while true do
+        local ok = checkPassword("internet boot: " .. url)
+        if ok == nil then return end
+        if ok then break end
+    end
+    local buffer, err = getInternetFile(url)
+    if not buffer then splash(err or "unkown") return end
+
+    if decrypto then
+        uncryptoBios()
+    else
+        cryptoBios()
+    end
+    computer.getBootUrl = function() return url end
+    computer.getBootScreen = function() return screen end
+    garbage_collect()
+    --originalResolution()
+    status("boot to url: " .. url)
+    sound(1)
+    bootState = true
+    assert(xpcall(assert(load(buffer, "=init")), traceback))
+    shutdown()
+end
+
+local function webMarket()
+    while true do
+        if checkInternet() then return end
+
+        local buffer, err = getInternetFile("https://raw.githubusercontent.com/igorkll/webMarket/main/filelist.txt")
+        if not buffer then splash(err or "unkown") return end
+
+        local list, names, links = split(buffer, "\n"), {}, {}
+        for i = 1, #list do
+            local link, name = table.unpack(split(list[i], ";"))
+            names[#names + 1] = name:match("[^.%.]+")
+            links[#links + 1] = link
+        end
+        names[#names + 1] = "back"
+
+        local select = menu("web apps", names)
+        local link = links[select]
+        if not link then return end
+
+        internetBoot(link, true)
+    end
+end
+
+local function resolution()
+    local strs = {"80x25", "50x16", "25x8", "64x32", "40x20", "32x16", "20x10", "clear", "back"}
+    local select = 1
+    while true do
+        select = menu("resolution", strs, select)
+        if select == 8 then
+            setDataPart(2, "")
+            setDataPart(3, "")
+            setResolution()
+        elseif select == 9 then
+            return
+        else
+            local resolution = split(strs[select], "x")
+            setDataPart(2, tostring(resolution[1]))
+            setDataPart(3, tostring(resolution[2]))
+            setResolution()
+        end
+    end
+end
+
+local function biosUpdate(noSplash)
+    if checkInternet(noSplash) then return end
+    while true do
+        local ok = checkPassword("update bios")
+        if ok == nil then return end
+        if ok then break end
+    end
+    local file, err = getInternetFile("https://raw.githubusercontent.com/igorkll/topBiosV5/main/biosv7.bin")
+    if not file then
+        if not noSplash then splash(err or "unkown") end
+        return
+    end
+    uncryptoBios()
+    if file ~= eeprom.get() then
+        if yesno("update?") then
+            writeSplash()
+            eeprom.set(file)
+            shutdown(true)
+        end
+    else
+        if not noSplash then splash("update not found") end
+    end
+end
+
+local function password()
+    while true do
+        local ok = checkPassword("open password cfg")
+        if ok == nil then return end
+        if ok then break end
+    end
+    local select = 1
+    while true do
+        select = menu("password", {"set", "reset", "set a menu", "set a boot", "disable", "back"}, select)
+        if select == 1 then
+            local input = inputZone("new password", true)
+            if input ~= "" then setDataPart(8, input) end
+        elseif select == 2 then
+            setDataPart(8, "")
+            setDataPart(9, "")
+        elseif select == 3 then
+            setDataPart(9, "menu")
+        elseif select == 4 then
+            setDataPart(9, "boot")
+        elseif select == 5 then
+            setDataPart(9, "")
+        elseif select == 6 then
+            return
+        end
+    end
+end
+
+local function lua()
+    while true do
+        local ok = checkPassword("open lua")
+        if ok == nil then return end
+        if ok then break end
+    end
+    while true do
+        clear()
+        gpu.set(1, 1, "lua: ")
+        local read = input(6, 1)
+        if read == "" then return end
+        local code, err = load(read, nil, "=lua")
+        if not code then
+            splash(err or "unkown")
+        else
+            cryptoBios()
+            local ok, err = pcall(code)
+            splash(tostring(err or "nil"))
+        end
+    end
+end
+
+local function diskMenager()
+    while true do
+        local ok = checkPassword("open disk manager")
+        if ok == nil then return end
+        if ok then break end
+    end
+    local function main()
+        local function readonlySplash(address) 
+            if component.proxy(address).isReadOnly() then
+                splash("drive is read only")
+                return true
+            end
+        end
+        local function renamer()
+            local address = selectfs("renamer")
+            if address then
+                if readonlySplash(address) then return end
+                clear()
+                gpu.set(1, 1, "new name: ")
+                local read = input(11, 1)
+                if read ~= "" then
+                    status("renaming...")
+                    component.proxy(address).setLabel(read)
+                end
+            end
+        end
+        local function formater()
+            local address = selectfs("formatter")
+            if address then
+                if readonlySplash(address) then return end
+                if yesno("format? " .. miniStr(address)) then
+                    status("formatting...")
+                    component.proxy(address).remove("/")
+                end
+            end
+        end
+        local function installer(install)
+            local drive1 = selectfs("drive1")
+            if drive1 then
+                local drive2 = selectfs("drive2")
+                if readonlySplash(drive2) then return end
+                if drive2 and yesno(((install and "install") or "clone").." from "..drive1:sub(1, 6).." to "..drive2:sub(1, 6).."?") then
+                    if install then
+                        status("installing...")
+                    else
+                        status("cloning...")
+                    end
+                    drive1 = component.proxy(drive1)
+                    drive2 = component.proxy(drive2)
+                    if not install then drive2.remove("/") end
+                    local function fsname(path)
+                        local data = ""
+                        for substring in path:gmatch("[^/\\]+") do
+                            data = substring
+                        end
+                        return data
+                    end
+                    local function copy(fs1, fs2, path, install)
+                        for _, data in ipairs(fs1.list(path)) do
+                            local fullPath = path..data
+                            if fsname(fullPath):sub(1, 1) ~= "." or not install then
+                                if fs1.isDirectory(fullPath) then
+                                    fs2.makeDirectory(fullPath)
+                                    copy(fs1, fs2, fullPath, install)
+                                else
+                                    assert(saveFile(fs2, fullPath, assert(getFile(fs1, fullPath))))
+                                end
+                            end
+                        end
+                    end
+                    copy(drive1, drive2, "/", install)
+                end
+            end
+        end
+        local function informer()
+            local oldSelect
+            while true do
+                local drive = selectfs("select drive", oldSelect)
+                oldSelect = drive
+                if drive then
+                    drive = component.proxy(drive)
+                    clear()
+                    gpu.set(1, 1, "label: " .. tostring(drive.getLabel()))
+                    gpu.set(1, 2, "total space: " .. tostring(math.floor(drive.spaceTotal() / 1024)) .. "k")
+                    gpu.set(1, 3, "total used: " .. tostring(math.floor(drive.spaceUsed() / 1024)) .. "k")
+                    gpu.set(1, 4, "is read only: " .. tostring(drive.isReadOnly()))
+                    gpu.set(1, 5, "is bootable: " .. tostring(isBootFs(drive.address)))
+                    waitFoTouch(6)
+                else
+                    return
+                end
+            end
+        end
+        menuPro("disk manager", {"rename", "format", "install", "clone", "info"}, {renamer, formater, installer, installer, informer}, {nil, nil, {true}})
+    end
+    local ok, err = pcall(main)
+    if not ok then splash(err or "unkown") end
+end
+
+local function monitor()
+    local strs = {}
+    local addresses = {}
+    local num = 1
+    local count = 0
+    for address in component.list("screen") do
+        count = count + 1
+        if address == getDataPart(10) then
+            num = count
+        end
+        table.insert(addresses, address)
+        table.insert(strs, miniStr(address))
+    end
+    table.insert(strs, "back")
+
+    while true do
+        num = menu("monitors", strs, num)
+        local address = addresses[num]
+        if not address then
+            if num == #strs then
+                return
+            end
+        else
+            setMonitor(address)
+        end
+    end
+end
+
+local function soundMenu()
+    local state = yesno("set sound state", true, soundAllow)
+    soundAllow = state
+    setDataPart(11, (state and "1") or "0")
+end
+
+local function settingsMenu()
+    menuPro("settings", {"resolution", "password", "monitor", "sound"},
+    {resolution, password, monitor, soundMenu})
+end
+
+local function apps()
+    menuPro("apps", {"fastboot", "internet boot", "bios update", "lua", "disk manager", "web market"},
+    {fastboot, internetBoot, biosUpdate, lua, diskMenager, webMarket})
+end
+
+local function mainmenu()
+    while getDataPart(9) == "menu" do
+        local ok = checkPassword("open bios menu")
+        if ok == nil then return end
+        if ok then break end
+    end
+    menuPro("top bios v7", {"select", "apps", "settings", "shutdown", "reboot"},
+    {selectbootdevice, apps, settingsMenu, shutdown, shutdown},
+    {nil, nil, nil, nil, {true}})
+end
+
+-------------------------------------------------------main
+
+garbage_collect()
+
+if getDataPart(4) == "true" then
+    computer.beep(1800)
+    splash("bios runned in dev mode")
+end
+while getDataPart(9) == "boot" do
+    local ok = checkPassword("boot")
+    if ok == nil then shutdown() end
+    if ok then break end
+end
+
+local isPlay = false
+
+::respring::
+
+local bootAddress = getDataPart(1)
+if bootAddress ~= "" and (not component.proxy(bootAddress) or not isBootFs(bootAddress)) then
+    setDataPart(1, "")
+end
+
+if isControl() then
+    ::startMenu::
+    clear()
+    gpu.setForeground(optimizeColor(0xFF0000, nil, true))
+    gpu.setBackground(optimizeColor(0xFFFFFF, nil, false))
+    gpu.set(1, 1, "TOP BIOS V7")
+    gpu.setForeground(optimizeColor(0x888888, 0xAAAAAA, false))
+    gpu.setBackground(0xFFFFFF)
+
+    local str = miniStr(getDataPart(1))
+    if not str or str == "" then str = "null" end
+    gpu.set(1, 2, "boot: " .. str)
+    gpu.set(1, 3, "alt-menu")
+    gpu.set(1, 4, "enter-boot")
+
+    if not isPlay then
+        sound(0)
+        isPlay = true
+    end
+
+    for i = 1, 50 do
+        local eventName, uuid, posX, code, button = computer.pullSignal(0.1)
+        if eventName == "key_down" and uuid == keyboard then
+            if code == 56 then
+                sound(3)
+                mainmenu()
+                goto startMenu
+            elseif code == 28 then
+                sound(3)
+                break
+            end
+        elseif eventName == "touch" and uuid == screen and button == 0 then
+            if code == 3 and posX <= 8 then
+                sound(3)
+                mainmenu()
+                goto startMenu
+            elseif code == 4 and posX <= 10 then
+                sound(3)
+                break
+            end
+        end
+    end
+end
+
+if not component.proxy(getDataPart(1)) then
+    status("search for a bootable file", 0.4)
+    for address in component.list("filesystem") do
+        if isBootFs(address) then
+            status("installed as a bootable: " .. miniStr(address))
+            setDataPart(1, address, true)
+            break
+        end
+    end
+end
+
+if not component.proxy(getDataPart(1)) then
+    status("boot file in not found", 0.5)
+    goto respring
+end
+
+bootTo(getDataPart(1))
