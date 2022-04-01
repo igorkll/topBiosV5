@@ -90,7 +90,7 @@ end
 local function optimizeBeep(freq, del, bloked)
     if componentBeep then
         componentBeep.beep({[freq] = del})
-        if bloked then delay(del * 1.2) end
+        if bloked then delay(del) end
     else
         computer.beep(freq, del)
     end
@@ -98,7 +98,7 @@ end
 
 local soundAllow
 local function sound(num)
-    if bootState or not soundAllow then return end
+    if bootState or not soundAllow then return false end
     if num == 0 then
         optimizeBeep(1600, 0.05, true)
         optimizeBeep(1400, 0.05, true)
@@ -112,6 +112,7 @@ local function sound(num)
     elseif num == 3 then
         optimizeBeep(2000, 0.01)
     end
+    return true
 end
 
 local function split(str, sep)
@@ -151,6 +152,7 @@ local function getDataPart(part)
 end
 
 local function setDataPart(part, newdata, doNotSplash)
+    if getDataPart(part) == newdata then return end
     if not bootState and not doNotSplash then writeSplash() end
     if newdata:find("\n") then error("\\n char") end
     parts = split(eeprom_getData(), "\n")
@@ -174,17 +176,26 @@ if not gpu then
     noControl()
 else
     if not component.proxy(getDataPart(10)) then
-        setDataPart(10, getComponent("screen").address, true)
+        local screen = getComponent("screen")
+        if screen then
+            setDataPart(10, screen.address, true)
+        end
     end
     screen = getDataPart(10)
-    if screen then
+    if component.proxy(screen) then
         gpu.bind(screen)
         rx, ry = gpu.getResolution()
         depth = gpu.getDepth()
         keyboard = originalInvoke(screen, "getKeyboards")[1]
     else
+        screen = nil
         noControl()
     end
+end
+
+local gpu_address
+if screen then
+    gpu_address = gpu.address
 end
 
 -------------------------------------------------------functions
@@ -322,6 +333,10 @@ local function yesno(label, simple, state)
     end
 end
 
+local function isControl()
+    return screen and (keyboard or (math.floor(computer.getDeviceInfo()[screen].width) ~= 1))
+end
+
 local function waitFoTouch(posY)
     gpu.set(1, posY, "press enter or touch to continue...")
     while true do
@@ -337,18 +352,19 @@ local function waitFoTouch(posY)
     sound(3)
 end
 
-local function splash(str)
-    if not screen then return end
-    clear()
-    gpu.set(1, 1, str)
-    waitFoTouch(2)
-end
-
 function status(str, delayTime)
     if not screen then return end
     clear()
     setText(str, ry // 2)
     if delayTime then delay(delayTime) end
+end
+
+local function splash(str)
+    if not screen then return end
+    if not isControl() then status(str, 1) return end
+    clear()
+    gpu.set(1, 1, str)
+    waitFoTouch(2)
 end
 
 local function input(posX, posY, crypto)
@@ -400,7 +416,7 @@ end
 
 local function garbage_collect()
     status("garbage collection")
-    for i = 1, 10 do computer.pullSignal(0.1) end
+    for i = 1, 5 do computer.pullSignal(0.1) end
 end
 
 -------------------------------------------------------functions
@@ -486,29 +502,43 @@ local function originalResolution()
 end
 ]]
 
+local function boot(buffer, logo, decrypto)
+    if decrypto then
+        uncryptoBios()
+    else
+        cryptoBios()
+    end
+    computer.getBootScreen = function() return screen end
+    computer.getBootGpu = function()
+        if screen then
+            return gpu_address
+        end
+        return nil
+    end
+    garbage_collect()
+    --originalResolution()
+    status(logo)
+    sound(1)
+    bootState = true
+    assert(xpcall(assert(load(buffer, "=boot")), traceback))
+    shutdown()
+end
+
 local function bootTo(address)
-    local fs, data = component.proxy(address)
+    local fs, buffer = component.proxy(address)
     if fs.exists("/init.lua") then
         computer.getBootAddress = function() return address end
         computer.setBootAddress = function(address) pcall(setDataPart, 1, address) end
-        data = getFile(fs, "/init.lua")
+        buffer = getFile(fs, "/init.lua")
     elseif fs.exists("/OS.lua") then
         eepromFakeFunctions.getData = address
         eepromFakeFunctions.setData = function(address) pcall(setDataPart, 1, address) end
-        data = getFile(fs, "/OS.lua")
+        buffer = getFile(fs, "/OS.lua")
     else
         error("boot file not found")
     end
 
-    cryptoBios()
-    computer.getBootScreen = function() return screen end
-    garbage_collect()
-    --originalResolution()
-    status("boot to drive: " .. miniStr(address) .. "...")
-    sound(1)
-    bootState = true
-    assert(xpcall(assert(load(data, "=init")), traceback))
-    shutdown()
+    boot(buffer, "booting to drive: " .. miniStr(address) .. "...")
 end
 
 local function setResolution()
@@ -561,10 +591,6 @@ local function checkPassword(text)
     local userInput = inputZone("password" .. ((text and (" to " .. text)) or ""), true)
     if userInput == "" then return nil end
     return data == userInput
-end
-
-local function isControl()
-    return screen and (keyboard or (math.floor(computer.getDeviceInfo()[screen].width) ~= 1))
 end
 
 local function setMonitor(address)
@@ -637,20 +663,8 @@ local function internetBoot(mainUrl, decrypto)
     local buffer, err = getInternetFile(url)
     if not buffer then splash(err or "unkown") return end
 
-    if decrypto then
-        uncryptoBios()
-    else
-        cryptoBios()
-    end
     computer.getBootUrl = function() return url end
-    computer.getBootScreen = function() return screen end
-    garbage_collect()
-    --originalResolution()
-    status("boot to url: " .. miniUrl(url))
-    sound(1)
-    bootState = true
-    assert(xpcall(assert(load(buffer, "=init")), traceback))
-    shutdown()
+    boot(buffer, "booting to url: " .. miniUrl(url) .. "...", decrypto)
 end
 
 local function webMarket()
@@ -737,7 +751,6 @@ local function password()
             end
         elseif select == 2 then
             setDataPart(8, "")
-            setDataPart(9, "")
         elseif select == 3 then
             setDataPart(9, "menu")
         elseif select == 4 then
@@ -788,19 +801,11 @@ local function runUtility()
     if num > #utilities then return end
     local utility = utilities[num]
 
-    local file = getFile(component.proxy(utility[1]), utility[2])
+    local buffer = getFile(component.proxy(utility[1]), utility[2])
 
-    cryptoBios()
     computer.getBootAddress = function() return utility[1] end
-    computer.getBootScreen = function() return screen end
     computer.getBootPath = function() return utility[2] end
-    garbage_collect()
-    --originalResolution()
-    status("boot to utility: " .. strs[num])
-    sound(1)
-    bootState = true
-    assert(xpcall(assert(load(file, "=utility")), traceback))
-    shutdown()
+    boot(buffer, "booting to utility: " .. strs[num] .. "...")
 end
 
 local function diskMenager()
@@ -959,14 +964,20 @@ end
 
 garbage_collect()
 
-if getDataPart(4) == "true" then
-    computer.beep(1800)
-    splash("bios runned in dev mode")
-end
 while getDataPart(9) == "boot" do
     local ok = checkPassword("boot")
     if ok == nil then shutdown() end
     if ok then break end
+end
+
+if getDataPart(4) == "true" then
+    computer.beep(1800)
+    splash("bios runned in dev mode")
+end
+
+if not isControl() then
+    status("hello")
+    if not sound(0) and screen then delay(1) end
 end
 
 local isPlay = false
@@ -1023,7 +1034,7 @@ if isControl() then
 end
 
 if not component.proxy(getDataPart(1)) then
-    status("search for a bootable file", 0.4)
+    status("search for a bootable file", 0.3)
     for address in component.list("filesystem") do
         if isBootFs(address) then
             status("installed as a bootable: " .. miniStr(address))
@@ -1034,7 +1045,8 @@ if not component.proxy(getDataPart(1)) then
 end
 
 if not component.proxy(getDataPart(1)) then
-    status("boot file in not found", 0.5)
+    status("boot file in not found", 0.3)
+    computer.pullSignal(0) --no moitor crash fix
     goto respring
 end
 
