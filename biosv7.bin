@@ -1,4 +1,4 @@
-local table_insert, ssub, table_concat, component, error, xpcall, assert, shutdown, checkArg, pairs, type, unpack, traceback = table.insert, string.sub, table.concat, component, error, xpcall, assert, computer.shutdown, checkArg, pairs, type, table.unpack, debug.traceback
+local table_unpack, computer_pullSignal, table_insert, ssub, table_concat, component, error, xpcall, assert, shutdown, checkArg, pairs, type, unpack, traceback = table.unpack, computer.pullSignal, table.insert, string.sub, table.concat, component, error, xpcall, assert, computer.shutdown, checkArg, pairs, type, table.unpack, debug.traceback
 
 -------------------------------------------------------functions
 
@@ -70,20 +70,29 @@ cryptoBios()
 
 -------------------------------------------------------functions
 
+local bootState, status = false
+
+computer.pullSignal = function(time)
+    local dat = {computer_pullSignal(time)}
+    if not bootState and dat[1] == "component_removed" and dat[2] == eeprom_address and dat[3] == "eeprom" then
+        shutdown()
+    end
+    return table_unpack(dat)
+end
+
 local function delay(time)
     local inTime = computer.uptime()
     while computer.uptime() - inTime < time do
-        computer.pullSignal(0.01)
+        computer.pullSignal(0)
     end
 end
 
-local bootState, status = false
-
-local function optimizeBeep(freq, delay)
+local function optimizeBeep(freq, del, bloked)
     if componentBeep then
-        componentBeep.beep({[freq] = delay})
+        componentBeep.beep({[freq] = del})
+        if bloked then delay(del * 1.2) end
     else
-        computer.beep(freq, delay)
+        computer.beep(freq, del)
     end
 end
 
@@ -91,15 +100,14 @@ local soundAllow
 local function sound(num)
     if bootState or not soundAllow then return end
     if num == 0 then
-        computer.beep(1600, 0.1)
-        computer.beep(1400, 0.1)
-        delay(0.05)
-        computer.beep(1400, 0.1)
-        optimizeBeep(1600, 0.1)
+        optimizeBeep(1600, 0.05, true)
+        optimizeBeep(1400, 0.05, true)
+        optimizeBeep(1400, 0.05, true)
+        optimizeBeep(1600, 0.05)
     elseif num == 1 then
         optimizeBeep(1000, 0.2)
     elseif num == 2 then
-        computer.beep(1333, 0.05)
+        optimizeBeep(1333, 0.05, true)
         optimizeBeep(1333, 0.05)
     elseif num == 3 then
         optimizeBeep(2000, 0.01)
@@ -296,7 +304,9 @@ local function menuPro(label, strs, utiles, args, num)
     strs[#strs + 1] = "back" --да я знаю что так нельзя, что таблица ссылачьный тип, бла бла бла даже слышать не хочу
     local num = num or 1
     while true do
-        num = menu(label, strs, num)
+        local localLabel = label
+        if type(label) == "function" then localLabel = label() end
+        num = menu(localLabel, strs, num)
         if num == #strs then return end
         local arg = {}
         if args and args[num] then arg = args[num] end
@@ -349,7 +359,7 @@ local function input(posX, posY, crypto)
     local buffer = ""
     while true do
         gpu.set(posX, posY, "_")
-        local eventName, uuid, char, code = computer.pullSignal(1)
+        local eventName, uuid, char, code = computer.pullSignal()
         if eventName == "key_down" and uuid == keyboard then
             if code == 28 then
                 sound(3)
@@ -791,91 +801,94 @@ local function diskMenager()
     local function main()
         local function readonlySplash(address) 
             if component.proxy(address).isReadOnly() then
-                splash("drive is read only")
+                splash("this drive(" .. fsName(address) .. ")is read only")
                 return true
             end
         end
-        local function renamer()
-            local address = selectfs("renamer")
-            if address then
-                if readonlySplash(address) then return end
-                clear()
-                gpu.set(1, 1, "new name: ")
-                local read = input(11, 1)
-                if read ~= "" then
-                    status("renaming...")
-                    component.proxy(address).setLabel(read)
-                end
+
+        local function renamer(address)
+            if readonlySplash(address) then return end
+            clear()
+            gpu.set(1, 1, "new name: ")
+            local read = input(11, 1)
+            if read ~= "" then
+                status("renaming...")
+                component.proxy(address).setLabel(read)
             end
         end
-        local function formater()
-            local address = selectfs("formatter")
-            if address then
-                if readonlySplash(address) then return end
-                if yesno("format? " .. miniStr(address)) then
-                    status("formatting...")
-                    component.proxy(address).remove("/")
-                end
+        local function eraseLabel(address)
+            if readonlySplash(address) then return end
+            if yesno("erase label?") then
+                status("renaming...")
+                component.proxy(address).setLabel(nil)
             end
         end
-        local function installer(install)
-            local drive1 = selectfs("drive1")
-            if drive1 then
-                local drive2 = selectfs("drive2")
-                if readonlySplash(drive2) then return end
-                if drive2 and yesno(((install and "install") or "clone").." from "..drive1:sub(1, 6).." to "..drive2:sub(1, 6).."?") then
-                    if install then
-                        status("installing...")
-                    else
-                        status("cloning...")
+        local function formater(address)
+            if readonlySplash(address) then return end
+            if yesno("format? " .. fsName(address)) then
+                status("formatting...")
+                component.proxy(address).remove("/")
+            end
+        end
+        local function installer(address, install)
+            local installOrClone = ((install and "install") or "clone")
+            local drive1 = address
+            local drive2 = selectfs(installOrClone .. " to?")
+            if drive1 == drive2 then splash("drive equals") return end
+            if not drive2 or readonlySplash(drive2) then return end
+            if yesno(installOrClone .. " from ".. fsName(drive1) .." to ".. fsName(drive2) .."?") then
+                if install then
+                    status("installing...")
+                else
+                    status("cloning...")
+                end
+                drive1 = component.proxy(drive1)
+                drive2 = component.proxy(drive2)
+                if not install then drive2.remove("/") end
+                local function fsname(path)
+                    local data = ""
+                    for substring in path:gmatch("[^/\\]+") do
+                        data = substring
                     end
-                    drive1 = component.proxy(drive1)
-                    drive2 = component.proxy(drive2)
-                    if not install then drive2.remove("/") end
-                    local function fsname(path)
-                        local data = ""
-                        for substring in path:gmatch("[^/\\]+") do
-                            data = substring
-                        end
-                        return data
-                    end
-                    local function copy(fs1, fs2, path, install)
-                        for _, data in ipairs(fs1.list(path)) do
-                            local fullPath = path..data
-                            if fsname(fullPath):sub(1, 1) ~= "." or not install then
-                                if fs1.isDirectory(fullPath) then
-                                    fs2.makeDirectory(fullPath)
-                                    copy(fs1, fs2, fullPath, install)
-                                else
-                                    assert(saveFile(fs2, fullPath, assert(getFile(fs1, fullPath))))
-                                end
+                    return data
+                end
+                local function copy(fs1, fs2, path, install)
+                    for _, data in ipairs(fs1.list(path)) do
+                        local fullPath = path..data
+                        if fsname(fullPath):sub(1, 1) ~= "." or not install then
+                            if fs1.isDirectory(fullPath) then
+                                fs2.makeDirectory(fullPath)
+                                copy(fs1, fs2, fullPath, install)
+                            else
+                                assert(saveFile(fs2, fullPath, assert(getFile(fs1, fullPath))))
                             end
                         end
                     end
-                    copy(drive1, drive2, "/", install)
                 end
+                copy(drive1, drive2, "/", install)
             end
         end
-        local function informer()
-            local oldSelect
-            while true do
-                local drive = selectfs("select drive", oldSelect)
-                oldSelect = drive
-                if drive then
-                    drive = component.proxy(drive)
-                    clear()
-                    gpu.set(1, 1, "label: " .. tostring(drive.getLabel()))
-                    gpu.set(1, 2, "total space: " .. tostring(math.floor(drive.spaceTotal() / 1024)) .. "k")
-                    gpu.set(1, 3, "total used: " .. tostring(math.floor(drive.spaceUsed() / 1024)) .. "k")
-                    gpu.set(1, 4, "is read only: " .. tostring(drive.isReadOnly()))
-                    gpu.set(1, 5, "is bootable: " .. tostring(isBootFs(drive.address)))
-                    waitFoTouch(6)
-                else
-                    return
-                end
-            end
+        local function informer(address)
+            local drive = component.proxy(address)
+            clear()
+            gpu.set(1, 1, "label: " .. tostring(drive.getLabel()))
+            gpu.set(1, 2, "address: " .. tostring(miniStr(address)))
+            gpu.set(1, 3, "total space: " .. tostring(math.floor(drive.spaceTotal() / 1024)) .. "k")
+            gpu.set(1, 4, "total used: " .. tostring(math.floor(drive.spaceUsed() / 1024)) .. "k")
+            gpu.set(1, 5, "is read only: " .. tostring(drive.isReadOnly()))
+            gpu.set(1, 6, "is bootable: " .. tostring(isBootFs(drive.address)))
+            waitFoTouch(7)
         end
-        menuPro("disk manager", {"rename", "format", "install", "clone", "info"}, {renamer, formater, installer, installer, informer}, {nil, nil, {true}})
+
+        local selected
+        while true do
+            selected = selectfs("select drive", selected)
+            if not selected then return end
+
+            menuPro(function() return "selected drive: " .. fsName(selected) end, {"rename", "erase label", "format", "install", "clone", "info"},
+            {renamer, eraseLabel, formater, installer, installer, informer},
+            {{selected}, {selected}, {selected}, {selected, true}, {selected}, {selected}})
+        end
     end
     local ok, err = pcall(main)
     if not ok then splash(err or "unkown") end
