@@ -1,5 +1,9 @@
+local table_insert, ssub, table_concat, component, error, xpcall, assert, shutdown, checkArg, pairs, type, unpack, traceback = table.insert, string.sub, table.concat, component, error, xpcall, assert, computer.shutdown, checkArg, pairs, type, table.unpack, debug.traceback
+
+-------------------------------------------------------functions
+
 local function getDeviceLevel(address)
-    return tonumber(computer.getDeviceInfo()[address].width) or math.huge
+    return tonumber(computer.getDeviceInfo()[address].width) or false
 end
 
 local function getComponent(ctype)
@@ -12,7 +16,9 @@ local function getComponent(ctype)
         for address, ltype in component.list(ctype) do
             if ctype == ltype then
                 local level = getDeviceLevel(address)
-                if level > maxlevel then
+                if not level then
+                    deviceaddress = address
+                elseif level > maxlevel then
                     maxlevel = level
                     deviceaddress = address
                     finded = true
@@ -35,7 +41,6 @@ local componentBeep = getComponent("beep")
 
 local originalInvoke = component.invoke
 computer.setArchitecture = nil
-local ssub, table_concat, component, error, xpcall, assert, shutdown, checkArg, pairs, type, unpack, traceback = string.sub, table.concat, component, error, xpcall, assert, computer.shutdown, checkArg, pairs, type, table.unpack, debug.traceback
 local eepromFakeFunctions = {makeReadonly = false, get = "", set = {nil, "storage is readonly"}, setData = {nil, "storage is readonly"}, getData = "", getChecksum = ""}
 local function fakeInvoke(address, name, ...)
     checkArg(1, address, "string")
@@ -61,6 +66,7 @@ end
 
 local function cryptoBios() component.invoke = fakeInvoke end
 local function uncryptoBios() component.invoke = originalInvoke end
+cryptoBios()
 
 -------------------------------------------------------functions
 
@@ -102,15 +108,20 @@ end
 
 local function split(str, sep)
     local parts, count = {}, 1
-    for i = 1, #str do
-        local char = ssub(str, i, i)
+    local i = 1
+    while true do
+        if i > #str then break end
+        local char = ssub(str, i, #sep + (i - 1))
         if not parts[count] then parts[count] = "" end
         if char == sep then
             count = count + 1
+            i = i + #sep
         else
-            parts[count] = parts[count] .. char
+            parts[count] = parts[count] .. ssub(str, i, i)
+            i = i + 1
         end
     end
+    if ssub(str, #str - (#sep - 1), #str) == sep then table_insert(parts, "") end
     return parts
 end
 
@@ -415,11 +426,15 @@ local function isBootFs(address)
     return proxy.exists("/init.lua") or proxy.exists("/OS.lua")
 end
 
+local function fsName(address)
+    return table_concat({miniStr(address), component.proxy(address).getLabel()}, ":")
+end
+
 local function selectfs(label, uuid, clearAllow, bottableOnly, isClear)
     local data = {n = {}, a = {}}
     for address in component.list("filesystem") do
         if not bottableOnly or isBootFs(address) then
-            data.n[#data.n + 1] = table.concat({miniStr(address), component.proxy(address).getLabel()}, ":")
+            data.n[#data.n + 1] = fsName(address)
             data.a[#data.a + 1] = address
         end
     end
@@ -465,17 +480,18 @@ local function bootTo(address)
     local fs, data = component.proxy(address)
     if fs.exists("/init.lua") then
         computer.getBootAddress = function() return address end
-        computer.setBootAddress = function(address) pcall(setDataPart, 1, address) cryptoBios() end
+        computer.setBootAddress = function(address) pcall(setDataPart, 1, address) end
         data = getFile(fs, "/init.lua")
     elseif fs.exists("/OS.lua") then
         eepromFakeFunctions.getData = address
-        eepromFakeFunctions.setData = function(address) pcall(setDataPart, 1, address) cryptoBios() end
+        eepromFakeFunctions.setData = function(address) pcall(setDataPart, 1, address) end
         data = getFile(fs, "/OS.lua")
     else
         error("boot file not found")
     end
-    computer.getBootScreen = function() return screen end
+
     cryptoBios()
+    computer.getBootScreen = function() return screen end
     garbage_collect()
     --originalResolution()
     status("boot to drive: " .. miniStr(address) .. "...")
@@ -552,6 +568,24 @@ local function setMonitor(address)
     depth = gpu.getDepth()
 end
 
+local function endAt(...)
+    local buff = ""
+    for i, data in ipairs(split(...)) do
+        buff = data
+    end
+    return buff
+end
+
+local function miniUrl(url)
+    return split(split(url, "//")[2], "/")[1] .. ":" .. endAt(url, "/")
+    --return endAt(url:match("[^/]+"), "//") .. ":" .. endAt(url, "/")
+    --return split(url:match("[^/]+"), "//") .. ":" .. endAt(url, "/")
+end
+
+local function fileName(str)
+    return endAt(str, "/"):match("[^.%.]+")
+end
+
 -------------------------------------------------------init
 
 if getDataPart(4) == "true" then
@@ -590,11 +624,6 @@ local function internetBoot(mainUrl, decrypto)
         url = inputZone("url")
         if url == "" then return end
     end
-    while true do
-        local ok = checkPassword("internet boot: " .. url)
-        if ok == nil then return end
-        if ok then break end
-    end
     local buffer, err = getInternetFile(url)
     if not buffer then splash(err or "unkown") return end
 
@@ -607,7 +636,7 @@ local function internetBoot(mainUrl, decrypto)
     computer.getBootScreen = function() return screen end
     garbage_collect()
     --originalResolution()
-    status("boot to url: " .. url)
+    status("boot to url: " .. miniUrl(url))
     sound(1)
     bootState = true
     assert(xpcall(assert(load(buffer, "=init")), traceback))
@@ -624,7 +653,7 @@ local function webMarket()
         local list, names, links = split(buffer, "\n"), {}, {}
         for i = 1, #list do
             local link, name = table.unpack(split(list[i], ";"))
-            names[#names + 1] = name:match("[^.%.]+")
+            names[#names + 1] = fileName(name)
             links[#links + 1] = link
         end
         names[#names + 1] = "back"
@@ -659,21 +688,15 @@ end
 
 local function biosUpdate(noSplash)
     if checkInternet(noSplash) then return end
-    while true do
-        local ok = checkPassword("update bios")
-        if ok == nil then return end
-        if ok then break end
-    end
     local file, err = getInternetFile("https://raw.githubusercontent.com/igorkll/topBiosV5/main/biosv7.bin")
     if not file then
         if not noSplash then splash(err or "unkown") end
         return
     end
-    uncryptoBios()
-    if file ~= eeprom.get() then
+    if file ~= originalInvoke(eeprom_address, "get") then
         if yesno("update?") then
             writeSplash()
-            eeprom.set(file)
+            originalInvoke(eeprom_address, "set", file)
             shutdown(true)
         end
     else
@@ -689,10 +712,13 @@ local function password()
     end
     local select = 1
     while true do
-        select = menu("password", {"set", "reset", "set a menu", "set a boot", "disable", "back"}, select)
+        select = menu("password", {"set", "reset", "set a menu", "set a boot", "back"}, select)
         if select == 1 then
             local input = inputZone("new password", true)
-            if input ~= "" then setDataPart(8, input) end
+            if input ~= "" then
+                setDataPart(8, input)
+                if getDataPart(9) == "" then setDataPart(9, "menu") end
+            end
         elseif select == 2 then
             setDataPart(8, "")
             setDataPart(9, "")
@@ -701,19 +727,12 @@ local function password()
         elseif select == 4 then
             setDataPart(9, "boot")
         elseif select == 5 then
-            setDataPart(9, "")
-        elseif select == 6 then
             return
         end
     end
 end
 
 local function lua()
-    while true do
-        local ok = checkPassword("open lua")
-        if ok == nil then return end
-        if ok then break end
-    end
     while true do
         clear()
         gpu.set(1, 1, "lua: ")
@@ -723,19 +742,52 @@ local function lua()
         if not code then
             splash(err or "unkown")
         else
-            cryptoBios()
             local ok, err = pcall(code)
             splash(tostring(err or "nil"))
         end
     end
 end
 
-local function diskMenager()
-    while true do
-        local ok = checkPassword("open disk manager")
-        if ok == nil then return end
-        if ok then break end
+local function runUtility()
+    local utilitiesPath = "/topBios/utilities/"
+
+    local utilities = {}
+    for address in component.list("filesystem") do
+        local proxy = component.proxy(address)
+        if proxy.exists(utilitiesPath) then
+            for i, data in ipairs(proxy.list(utilitiesPath)) do
+                local fullPath = utilitiesPath .. data
+                table_insert(utilities, {address, fullPath})
+            end
+        end
     end
+
+    local strs = {}
+    for i, data in ipairs(utilities) do
+        table_insert(strs, fsName(data[1]) .. ":" .. fileName(data[2]))
+    end
+    table_insert(strs, "back")
+
+    local num = menu("select utility", strs)
+    if num > #utilities then return end
+    local utility = utilities[num]
+
+    local file = getFile(component.proxy(utility[1]), utility[2])
+
+    cryptoBios()
+    computer.getBootAddress = function() return utility[1] end
+    computer.getBootScreen = function() return screen end
+    computer.getBootPath = function() return utility[2] end
+    garbage_collect()
+    --originalResolution()
+    status("boot to utility: " .. strs[num])
+    sound(1)
+    bootState = true
+    assert(xpcall(assert(load(file, "=utility")), traceback))
+    shutdown()
+end
+
+local function diskMenager()
     local function main()
         local function readonlySplash(address) 
             if component.proxy(address).isReadOnly() then
@@ -869,8 +921,8 @@ local function settingsMenu()
 end
 
 local function apps()
-    menuPro("apps", {"fastboot", "internet boot", "bios update", "lua", "disk manager", "web market"},
-    {fastboot, internetBoot, biosUpdate, lua, diskMenager, webMarket})
+    menuPro("apps", {"fastboot", "internet boot", "bios update", "lua", "disk manager", "web market", "run utility"},
+    {fastboot, internetBoot, biosUpdate, lua, diskMenager, webMarket, runUtility})
 end
 
 local function mainmenu()
