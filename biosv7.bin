@@ -41,7 +41,7 @@ local componentBeep = getComponent("beep")
 
 local originalInvoke = component.invoke
 computer.setArchitecture = nil
-local eepromFakeFunctions = {makeReadonly = false, get = "", set = {nil, "storage is readonly"}, setData = {nil, "storage is readonly"}, getData = "", getChecksum = ""}
+local eepromFakeFunctions = {makeReadonly = false, get = "", set = {nil, "storage is readonly"}, setData = {nil, "storage is readonly"}, getData = "", getChecksum = "", setLabel = {nil, "storage is readonly"}, getLabel = ""}
 local function fakeInvoke(address, name, ...)
     checkArg(1, address, "string")
     checkArg(2, name, "string")
@@ -660,11 +660,17 @@ local function webMarket()
         local buffer, err = getInternetFile("https://raw.githubusercontent.com/igorkll/webMarket/main/filelist.txt")
         if not buffer then splash(err or "unkown") return end
 
-        local list, names, links = split(buffer, "\n"), {}, {}
+        local list, names, links, cryptoRuns = split(buffer, "\n"), {}, {}, {}
         for i = 1, #list do
-            local link, name = table.unpack(split(list[i], ";"))
-            names[#names + 1] = fileName(name)
-            links[#links + 1] = link
+            local dat = list[i]
+            if dat then
+                local link, name, cryptoRun = table_unpack(split(dat, ";"))
+                if link and name then
+                    names[#names + 1] = fileName(name)
+                    links[#links + 1] = link
+                    cryptoRuns[#cryptoRuns + 1] = cryptoRun == "true"
+                end
+            end
         end
         names[#names + 1] = "back"
 
@@ -672,7 +678,7 @@ local function webMarket()
         local link = links[select]
         if not link then return end
 
-        internetBoot(link, true)
+        internetBoot(link, not cryptoRuns[select])
     end
 end
 
