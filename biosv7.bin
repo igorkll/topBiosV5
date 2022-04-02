@@ -502,7 +502,8 @@ local function originalResolution()
 end
 ]]
 
-local function boot(buffer, logo, decrypto)
+local function boot(buffer, logo, decrypto, returnCode)
+    if not returnCode then returnCode = 0 end
     if decrypto then
         uncryptoBios()
     else
@@ -521,7 +522,16 @@ local function boot(buffer, logo, decrypto)
     sound(1)
     bootState = true
     assert(xpcall(assert(load(buffer, "=boot")), traceback))
-    shutdown()
+    bootState = false
+    cryptoBios()
+    if returnCode == 0 then
+        shutdown()
+    elseif returnCode == 1 then
+        return
+    elseif returnCode == 2 then
+        shutdown(true)
+    end
+    error("return code is not found")
 end
 
 local function bootTo(address)
@@ -664,7 +674,7 @@ local function internetBoot(mainUrl, decrypto)
     if not buffer then splash(err or "unkown") return end
 
     computer.getBootUrl = function() return url end
-    boot(buffer, "booting to url: " .. miniUrl(url) .. "...", decrypto)
+    boot(buffer, "booting to url: " .. miniUrl(url) .. "...", decrypto, 1)
 end
 
 local function webMarket()
@@ -718,6 +728,7 @@ end
 
 local function biosUpdate(noSplash)
     if checkInternet(noSplash) then return end
+    status("downloading the update file")
     local file, err = getInternetFile("https://raw.githubusercontent.com/igorkll/topBiosV5/main/biosv7.bin")
     if not file then
         if not noSplash then splash(err or "unkown") end
@@ -805,7 +816,7 @@ local function runUtility()
 
     computer.getBootAddress = function() return utility[1] end
     computer.getBootPath = function() return utility[2] end
-    boot(buffer, "booting to utility: " .. strs[num] .. "...")
+    boot(buffer, "booting to utility: " .. strs[num] .. "...", false, 1)
 end
 
 local function diskMenager()
