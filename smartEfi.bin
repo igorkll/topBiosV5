@@ -1,0 +1,978 @@
+local ssub, table_insert, component_invoke, error, table_concat, debug_traceback, computer_shutdown, table_remove, component, bootfiles, nullfunc, beep, unicode, computer = string.sub, table.insert, component.invoke, error, table.concat, debug.traceback, computer.shutdown, table.remove, component, {"/init.lua", "/OS.lua"}, function() end, computer.beep, unicode, computer --все методы которые будут использоваться после запуска ос должны быть захешированы
+
+--------------------------------------------components
+
+local function getDeviceLevel(address)
+    return tonumber(computer.getDeviceInfo()[address].width) or false
+end
+
+function getCP(ctype)
+    local maxlevel = 0
+    local deviceaddress = nil
+    local finded = false
+
+    while true do
+        finded = false
+        for address, ltype in component.list(ctype) do
+            if ctype == ltype then
+                local level = getDeviceLevel(address)
+                if not level then
+                    deviceaddress = address
+                elseif level > maxlevel then
+                    maxlevel = level
+                    deviceaddress = address
+                    finded = true
+                    break
+                end
+            end
+        end
+        if not finded then
+            local address = component.proxy(deviceaddress or "")
+            return address
+        end
+    end
+end
+
+local eeprom = component.list("eeprom")()
+
+function eeprom_getData()
+    return component_invoke(eeprom, "getData")
+end
+
+function eeprom_setData(data)
+    component_invoke(eeprom, "setData", data)
+end
+
+local internet = getCP("internet")
+
+--------------------------------------------functions
+
+function split(str, sep)
+    local parts, count = {}, 1
+    local i = 1
+    while true do
+        if i > #str then break end
+        local char = ssub(str, i, #sep + (i - 1))
+        if not parts[count] then parts[count] = "" end
+        if char == sep then
+            count = count + 1
+            i = i + #sep
+        else
+            parts[count] = parts[count] .. ssub(str, i, i)
+            i = i + 1
+        end
+    end
+    if ssub(str, #str - (#sep - 1), #str) == sep then table_insert(parts, "") end
+    return parts
+end
+
+function getDataPart(part)
+    return split(eeprom_getData(), "\n")[part] or ""
+end
+
+function setDataPart(part, newdata)
+    if getDataPart(part) == newdata then return end
+    if newdata:find("\n") then error("\\n char") end
+    local parts = split(eeprom_getData(), "\n")
+    for i = part, 1, -1 do
+        if not parts[i] then parts[i] = "" end
+    end
+    parts[part] = newdata
+    eeprom_setData(table_concat(parts, "\n"))
+end
+
+function delay(time, func)
+    if not func then func = function() computer.pullSignal(0.1) end end
+    local inTime = computer.uptime()
+    while computer.uptime() - inTime < time do
+        if func() == false then
+            break
+        end
+    end
+end
+
+function getFile(fs, path)
+    local file, err = fs.open(path, "rb")
+    if not file then return nil, err end
+    local buffer = ""
+    while true do
+        local read = fs.read(file, math.huge)
+        if not read then break end
+        buffer = buffer .. read
+    end
+    fs.close(file)
+    return buffer
+end
+
+function getLabel(address, file)
+    local label = component_invoke(address, "getLabel")
+    return ((label and (label .. ":")) or "") .. ssub(address, 1, 3) .. ":" .. file
+end
+
+function labelIsReadonly(proxy)
+    return not pcall(proxy.setLabel, proxy.getLabel())
+end
+
+function getInternetFile(url)
+    --if not internet then return nil, "internet card is not found" end
+    local handle, data, result, reason = internet.request(url), ""
+    if handle then
+        while true do
+            result, reason = handle.read(math.huge)	
+            if result then
+                data = data .. result
+            else
+                handle.close()
+                
+                if reason then
+                    return nil, reason
+                else
+                    return data
+                end
+            end
+        end
+    else
+        return nil, "unvalid address"
+    end
+end
+
+local updateFile = getInternetFile("https://raw.githubusercontent.com/igorkll/topBiosV5/main/smartEfi.bin")
+if internet and not updateFile then
+    internet = nil
+end
+
+function formatString(str, size, mode)
+    str = unicode.sub(str, 1, size)
+    local value = size - unicode.len(str)
+
+    local substr = string.rep(" ", value)
+
+    if mode == 1 then
+        return substr .. str
+    elseif mode == 2 then
+        
+        str = string.rep(" ", value // 2) .. str .. string.rep(" ", value // 2)
+        if #str < size then
+            str = str .. string.rep(" ", size - unicode.len(str))
+        end
+        return str
+    else
+        return str .. substr
+    end
+end
+
+function getError(err)
+    return err or "unknown error"
+end
+
+function toValue(value)
+    if type(value) == "function" then
+        return value()
+    else
+        return value
+    end
+end
+
+function boots(address)
+    local function preBoots(address)
+        local proxy = component.proxy(address)
+        if not proxy then return {} end
+
+        local buffer, addresses = {}, {}
+
+        for i, v in ipairs(bootfiles) do
+            if proxy.exists(v) then
+                table_insert(buffer, v)
+                table_insert(addresses, address)
+            end
+        end
+
+        local path = "/boot/kernel/"
+        for _, file in ipairs(proxy.list(path) or {}) do
+            table_insert(buffer, path .. file)
+            table_insert(addresses, address)
+        end
+
+        return buffer, buffer, addresses
+    end
+    if address then
+        return preBoots(address)
+    else
+        local buffer, files, addresses = {}, {}, {}
+        for address in component.list("filesystem") do
+            local label = component_invoke(address, "getLabel")
+            local tbl = preBoots(address)
+            for i, v in ipairs(tbl) do
+                table_insert(buffer, (label and (label .. "-") or "") .. address:sub(1, 3) .. "-" .. v)
+                table_insert(files, v)
+                table_insert(addresses, address)
+            end
+        end
+        return buffer, files, addresses
+    end
+end
+
+function getLabel2(proxy)
+    return proxy.getLabel() or "Unnamed"
+end
+
+function fsName(address)
+    local proxy = component.proxy(address)
+    return formatString(getLabel2(proxy), 12) .. "  " .. (proxy.spaceTotal() >= 1048576 and "HDD" or proxy.spaceTotal() >= 65536 and "FDD" or "SYS") .. "  " .. (proxy.isReadOnly() and "R  " or "R/W") .. "  " .. formatString(string.format("%.1f", proxy.spaceUsed() / proxy.spaceTotal() * 100) .. "%", 6, 1) .. "  " .. formatString(address, 7) .. "…"
+end
+
+--------------------------------------------graphic init
+
+gpu, screen, keyboard = getCP("gpu")
+if gpu then
+    screen = getDataPart(1)
+    if not component.proxy(screen) then
+        screen = component.list("screen")()
+        if screen then
+            setDataPart(1, screen)
+        end
+    end
+    if screen then
+        keyboard = component_invoke(screen, "getKeyboards")[1]
+        gpu.bind(screen)
+    end
+end
+local rx, ry, depth
+if screen then
+    rx, ry = gpu.getResolution()
+    depth = math.floor(gpu.getDepth())
+    pcall(component_invoke, screen, "setPrecise", false)
+end
+
+--------------------------------------------functions
+
+isControl = screen and (keyboard or (math.floor(computer.getDeviceInfo()[screen].width) ~= 1))
+
+--------------------------------------------graphic
+
+function selectColor(mainColor, simpleColor, bw)
+    if depth == 4 then
+        return simpleColor or mainColor
+    elseif depth == 1 then
+        return bw and 0xFFFFFF or 0
+    else
+        return mainColor
+    end
+end
+
+mainback, mainfore = selectColor(0xE1E1E1, 0xFFFFFF, true), selectColor(0x878787, 0x222222, false)
+function setColor(back, fore)
+    gpu.setBackground(back or mainback)
+    gpu.setForeground(fore or mainfore)
+end
+
+function clear(back, fore)
+    setColor(back, fore)
+    gpu.fill(1, 1, rx, ry, " ")
+end
+
+function invert()
+    gpu.setForeground(gpu.setBackground(gpu.getForeground()))
+end
+
+function setText(text, posY)
+    local posX = ((rx // 2) - (unicode.len(text) // 2)) + 1
+    gpu.set(posX, posY, text)
+    return posX
+end
+
+function status(text, del, err)
+    if not screen then
+        if err then
+            error(text, 0)
+        end
+        return
+    end
+    if not isControl and del == true then del = 1 end
+    clear()
+    setText(text, ry // 2)
+    if del == true then
+        setText("press enter or touch to continue", (ry // 2) + 1)
+        while true do
+            local eventName, uuid, _, code, button = computer.pullSignal()
+            if eventName == "touch" and button == 0 and uuid == screen then
+                break
+            elseif eventName == "key_down" and code == 28 and uuid == keyboard then
+                break
+            end
+        end
+    elseif del then
+        delay(del)
+    end
+end
+
+function menu(label, inStrs, num)
+    local max = 0
+    for i, v in ipairs(inStrs) do
+        if unicode.len(v) > max then
+            max = unicode.len(v)
+        end
+    end
+
+    local strs = {}
+    table_insert(strs, "")
+    for i, v in ipairs(inStrs) do
+        table_insert(strs, formatString(v, max + 4, 2))
+    end
+
+    local pos, posY, oldpos, poss = (num or 1) + 1, (ry // 2) - (#strs // 2), nil, {}
+    if posY < 1 then posY = 1 end
+    while true do
+        local startpos = (pos // ry) * ry
+
+        if pos ~= oldpos then
+            clear()
+            if startpos == 0 then
+                setColor(selectColor(mainback, nil, false), selectColor(0, nil, true))
+                setText(label, posY)
+            end
+            setColor()
+            for i = 1, #strs do
+                local drawpos = (posY + i) - startpos
+                if drawpos >= 1 then
+                    if drawpos > ry then break end
+                    if i == pos then invert() end
+                    poss[i] = setText(strs[i], drawpos)
+                    if i == pos then invert() end
+                end
+            end
+        end
+
+        local eventData = {computer.pullSignal()}
+        oldpos = pos
+        if eventData[1] == "key_down" and eventData[2] == keyboard then
+            if eventData[4] == 28 then
+                break
+            elseif eventData[4] == 200 then
+                pos = pos - 1
+            elseif eventData[4] == 208 then
+                pos = pos + 1
+            end
+        elseif eventData[1] == "scroll" and eventData[2] == screen and keyboard then --проверка наличия клавиатуры потому что указатель без нее не отображаеться, если у меню был бы звук то на планшети без клавиатуры он не должег проигроваться при scroll
+            pos = pos - eventData[5]
+        elseif eventData[1] == "touch" and eventData[2] == screen and eventData[5] == 0 then
+            local ty = (eventData[4] - posY) + startpos
+            if ty >= 2 and ty <= #strs and eventData[3] >= poss[ty] and eventData[3] < (poss[ty] + unicode.len(strs[ty])) then
+                pos = ty
+                break
+            end
+        end
+        if pos < 2 then pos = 2 end
+        if pos > #strs then pos = #strs end
+    end
+    return pos - 1
+end
+
+function menuPro(label, strs, utilities, noBack, refreshMode, num)
+    if num and num > #strs then num = 1 end
+    while true do
+        local strs2 = {}
+        for i, v in ipairs(strs) do
+            table_insert(strs2, toValue(v))
+        end
+
+        if not noBack then
+            table_insert(strs2, "Back")
+        end
+        num = menu(toValue(label), strs2, num)
+        if not noBack then
+            table_remove(strs2, #strs2)
+        end
+
+        if utilities[num] then
+            local ok, err = pcall(utilities[num])
+            nullfunc()
+            if not ok then
+                status(getError(err), true)
+            end
+            if refreshMode then
+                return num
+            end
+        else
+            break
+        end
+    end
+end
+
+local inputBuf = {}
+function input(text, crypto)
+    if not keyboard then
+        status("keyboard is not found", true)
+        return nil
+    end
+    local buffer = ""
+    local center = ry // 2
+    local select = 0
+
+    local function redraw()
+        clear()
+        local buffer = buffer
+        if crypto then
+            buffer = string.rep("*", unicode.len(buffer))
+        end
+
+        local drawtext = text .. ": " .. buffer .. "_"
+        setText(drawtext, center)
+    end
+
+    while true do
+        redraw()
+        local eventName, uuid, char, code = computer.pullSignal()
+        if eventName == "key_down" and uuid == keyboard then
+            if code == 28 then
+                if not crypto and buffer ~= inputBuf[1] and buffer ~= "" then
+                    table_insert(inputBuf, 1, buffer)
+                end
+                return buffer
+            elseif code == 200 or code == 208 then
+                buffer = ""
+                if code == 200 then
+                    if select < #inputBuf then
+                        select = select + 1
+                    end
+                else
+                    if select > 0 then
+                        select = select - 1
+                    end
+                end
+                buffer = inputBuf[select] or ""
+                redraw()
+            elseif code == 14 then
+                if unicode.len(buffer) > 0 then
+                    select = 0
+                    buffer = unicode.sub(buffer, 1, unicode.len(buffer) - 1)
+                    redraw()
+                end
+            elseif char == 3 then
+                return nil
+            elseif char ~= 0 then
+                select = 0
+                buffer = buffer .. unicode.char(char)
+                redraw()
+            end
+        elseif eventName == "clipboard" and uuid == keyboard then
+            select = 0
+            buffer = buffer .. char
+            if unicode.sub(char, unicode.len(char), unicode.len(char)) == "\n" then
+                local data = unicode.sub(buffer, 1, unicode.len(buffer) - 1)
+                if not crypto and inputBuf[1] ~= data and inputBuf[1] ~= "" then
+                    table_insert(inputBuf, 1, data)
+                end
+                return data
+            end
+        elseif eventName == "touch" and uuid == screen then
+            if #buffer == 0 then
+                return nil
+            end
+        end
+    end
+end
+
+function yesno(label, simple, back)
+    if back then
+        local out = menu(label, {"no", "yes", "back"})
+        if out == 3 then
+            return nil
+        else
+            return out == 2
+        end
+    else
+        if simple then
+            return menu(label, {"no", "yes"}) == 2
+        else
+            return menu(label, {"no", "no", "yes", "no"}) == 3
+        end
+    end
+end
+
+--------------------------------------------boot
+
+function isBoot(address, file)
+    local ok, out = pcall(component_invoke, address, "exists", file)
+    return ok and out and not component_invoke(address, "isDirectory", file)
+end
+
+function bootTo(bootaddress, bootfile)
+    status("Boot from: " .. getLabel(bootaddress, bootfile), 1)
+
+    local bootcode = getFile(component.proxy(bootaddress), bootfile)
+
+    function computer.getBootAddress()
+        return bootaddress
+    end
+    function computer.getBootScreen()
+        return screen
+    end
+    function computer.getBootGpu()
+        if screen then
+            return gpu.address
+        end
+        return nil
+    end
+    function computer.getBootFile()
+        return bootfile
+    end
+
+    function computer.setBootAddress(address)
+        setDataPart(2, address or "")
+        if address == "" then
+            setDataPart(3, "")
+            return
+        end
+
+        local setFile
+        for i, v in ipairs(bootfiles) do
+            if component_invoke(address, "exists", v) then
+                setDataPart(3, v)
+                setFile = true
+                break
+            end
+        end
+
+        if not setFile then
+            setDataPart(3, "")
+        end
+    end
+    function computer.setBootScreen(address)
+        setDataPart(1, address or "")
+    end
+    function computer.setBootFile(file)
+        setDataPart(3, file or "")
+    end
+
+    function computer.shutdown(state)
+        if state == "fast" then
+            setDataPart(4, bootaddress .. ";" .. bootfile)
+            computer_shutdown(true)
+        else
+            computer_shutdown(state)
+        end
+    end
+
+    if bootfile == "/OS.lua" then
+        component.proxy(eeprom).getData = function() --для запуска mineOS, подменяю proxy а не invoke, потому что это менее громостко а изменения сами откатяться при сборки мусора
+            return bootaddress
+        end
+    end
+
+    beep(1000, 0.2)
+    local ok, err = xpcall(assert(load(bootcode, "=init")), debug_traceback)
+    if not ok then
+        nullfunc = function()
+            error(err, 0)
+        end
+        nullfunc()
+    end
+    computer_shutdown()
+end
+
+local function fsList()
+    local tbl = {}
+
+    for address in component.list("filesystem") do
+        table_insert(tbl, address)
+    end
+
+    local function strLevel(str)
+        local level = 0
+        for i = 1, #str do
+            level = level + (str:byte(i) * i)
+        end
+        return level
+    end
+
+    table.sort(tbl, function(a, b)
+        return strLevel(a) < strLevel(b)
+    end)
+
+    return ipairs(tbl)
+end
+
+--------------------------------------------menu
+
+function executeString(str, forceStatus)
+    local code, err = load(str)
+    if not code then
+        status(getError(err), true)
+        return nil, err
+    end
+    local dat = {pcall(code)}
+    if not dat[1] then
+        status(getError(dat[2]), true)
+    end
+    if forceStatus then
+        status(getError(dat[2]), true)
+    end
+    return table.unpack(dat)
+end
+
+--proxy.spaceTotal() >= 1048576 and "HDD" or proxy.spaceTotal() >= 65536 and "FDD" or "SYS"
+--…
+local function diskMenager()
+    local strs = {}
+    local utilities = {}
+    for _, address in fsList() do
+        local proxy = component.proxy(address)
+        local num
+
+        local function generateLabel()
+            return (getDataPart(2) == address and "> " or "  ") .. fsName(address) .. "  "
+        end
+        table_insert(strs, generateLabel)
+    
+        table_insert(utilities, function()
+            ::refresh::
+            local strs = {}
+            local utilities = {}
+
+            local kernelTbl = proxy.list("/boot/kernel") or {}
+            if proxy.exists("/init.lua") or proxy.exists("/OS.lua") or #kernelTbl > 0 then
+                table_insert(strs, "Set as bootable")
+                table_insert(strs, "Fastboot")
+
+                for i = 1, 2 do
+                    table_insert(utilities, function()
+                        local strs = {}
+                        local utilities = {}
+
+                        local function addFile(file)
+                            table_insert(utilities, function()
+                                if i == 1 then
+                                    status("Seting as bootable")
+                                    setDataPart(2, proxy.address)
+                                    setDataPart(3, file)
+                                else
+                                    bootTo(proxy.address, file)
+                                end
+                            end)
+                        end
+
+                        if i == 1 then
+                            table_insert(strs, "any")
+                            addFile("any")
+                        end
+
+                        for i, v in ipairs(bootfiles) do
+                            if proxy.exists(v) then
+                                table_insert(strs, v)
+                                addFile(strs[#strs])
+                            end
+                        end
+
+                        for _, file in ipairs(kernelTbl) do
+                            table_insert(strs, "/boot/kernel/" .. file)
+                            addFile(strs[#strs])
+                        end
+
+                        --[[
+                        if #strs == 1 or (i == 1 and #strs == 2) then
+                            utilities[1]()
+                            return
+                        end
+                        ]]
+
+                        menuPro("Select boot file", strs, utilities)
+                    end)
+                end
+            end
+
+            if not proxy.isReadOnly() then
+                table_insert(strs, "Format")
+                table_insert(utilities, function()
+                    if yesno("format?") then
+                        proxy.remove("")
+                        if address == getDataPart(2) then
+                            setDataPart(2, "")
+                            setDataPart(3, "")
+                        end
+                    end
+                end)
+            end
+
+            if not labelIsReadonly(proxy) then
+                if keyboard then
+                    table_insert(strs, "Change label")
+                    table_insert(utilities, function()
+                        local read = input("label")
+                        if read then
+                            proxy.setLabel(read)
+                        end
+                    end)
+                end
+
+                table_insert(strs, "Erase label")
+                table_insert(utilities, function()
+                    proxy.setLabel(nil)
+                end)
+            end
+
+            local fromAddress = address
+            local installCount = 0
+            for _, address in fsList() do
+                local toProxy = component.proxy(address)
+                if not toProxy.isReadOnly() and address ~= fromAddress and toProxy.spaceTotal() >= proxy.spaceUsed() then
+                    installCount = installCount + 1
+                end
+            end
+            if installCount > 0 then
+                table_insert(strs, "Move data")
+                table_insert(utilities, function()
+                    local function fsTag(address)
+                        local label = component.proxy(address).getLabel()
+                        if label == "" then
+                            label = nil
+                        end
+                        return (label and (label .. "-") or "") .. address:sub(1, 3)
+                    end
+
+                    local strs = {}
+                    local utilities = {}
+                    for _, address in fsList() do
+                        local toProxy = component.proxy(address)
+                        if not toProxy.isReadOnly() and address ~= fromAddress and toProxy.spaceTotal() >= proxy.spaceUsed() then
+                            local function generateLabel()
+                                return fsName(address)
+                            end
+
+                            table_insert(strs, generateLabel)
+                            table_insert(utilities, function()
+                                local format = yesno("format target drive?", nil, true)
+                                if format == nil then return end
+                                if menu("from: " .. fsTag(fromAddress) .. ", to: " .. fsTag(address) .. ", format: " .. tostring(format), {"confirm", "cancel"}) == 1 then
+                                    if format then
+                                        toProxy.remove("")
+                                    end
+                                    local function install(from, to, path)
+                                        for _, file in ipairs(from.list(path)) do
+                                            local full_path = path .. file
+                                            if from.isDirectory(full_path) then
+                                                to.makeDirectory(full_path)
+                                                install(from, to, full_path)
+                                            else
+                                                local data = getFile(from, full_path)
+                                                local file = to.open(full_path, "wb")
+                                                to.write(file, data)
+                                                to.close(file)
+                                            end
+                                        end
+                                    end
+                                    status("moving files")
+                                    install(proxy, toProxy, "/")
+                                end
+                            end)
+                        end
+                    end
+                    menuPro("select target drive, to clone: " .. fsTag(fromAddress), strs, utilities)
+                end)
+            end
+
+            num = menuPro(function() return (proxy.getLabel() or "Unnamed") .. " (" .. address .. ")" end, strs, utilities, nil, true, num)
+            if num then
+                goto refresh
+            end
+        end)
+    end
+    menuPro("Disk menager", strs, utilities)
+end
+
+function internetBoot(url)
+    url = url or input("url")
+    if not url then return end
+    return executeString(assert(getInternetFile(url)))
+end
+
+local function runWebUtility(url)
+    local dat = assert(getInternetFile(url or "https://raw.githubusercontent.com/igorkll/webMarket3/main/list.txt"))
+
+    local utility = {}
+    local strs = {}
+    local datas = split(dat, "\n")
+    for i, v in ipairs(datas) do
+        local subdat = split(v, ";")
+        
+        table_insert(strs, subdat[2])
+        table_insert(utility, function()
+            internetBoot(subdat[1])
+        end)
+    end
+
+    menuPro("Select os to install", strs, utility)
+end
+
+local function updateBios()
+    if yesno("update?") then
+        status("updating")
+        component_invoke(eeprom, "set", updateFile)
+        computer_shutdown(true)
+    end
+end
+
+local function lua()
+    while true do
+        local read = input("lua code or efi command")
+        if not read then break end
+        if read == "reset" then
+            status("resetting")
+            eeprom_setData("")
+            computer_shutdown(true)
+        elseif read == "multiboot" then
+            status("enabling multibooting")
+            setDataPart(2, "any")
+            setDataPart(3, "")
+        elseif read == "clearboot" then
+            status("clearing")
+            setDataPart(2, "")
+            setDataPart(3, "")
+        else
+            executeString(read, true)
+        end
+    end
+end
+
+--OpenOS 1.7.5 with the mod (recommended)
+--OpenOS 1.7.5
+--MineOS
+local function biosmenu()
+    local modes = {"Disk menager", "Shutdown", "Reboot"}
+    local utilities = {diskMenager, computer_shutdown, function()
+        computer_shutdown(true)
+    end}
+    if internet then
+        local index = 2
+        table_insert(modes, index, "Install operating system")
+        table_insert(utilities, index, runWebUtility)
+        index = index + 1
+
+        if keyboard then
+            table_insert(modes, index, "Internet boot")
+            table_insert(utilities, index, internetBoot)
+            index = index + 1
+        end
+
+        if component_invoke(eeprom, "get") ~= updateFile then
+            table_insert(modes, index, "Update EFI")
+            table_insert(utilities, index, updateBios)
+        end
+    end
+
+    if keyboard then
+        table_insert(modes, 2, "Lua Interpreter/Command Shell")
+        table_insert(utilities, 2, lua)
+    end
+
+    menuPro("Smart EFI", modes, utilities)
+end
+
+--------------------------------------------main
+
+::respring::
+
+if isControl and getDataPart(4) == "" then
+    if keyboard then
+        status("Press alt to open the efi menu")
+    else
+        status("Tap on the screen to open the efi menu")
+    end
+    delay(1, function()
+        local eventData = {computer.pullSignal(0.1)}
+        if eventData[1] == "key_down" and eventData[2] == keyboard then
+            if eventData[4] == 56 then
+                biosmenu()
+            elseif eventData[4] == 28 then
+                return false
+            end
+        elseif not keyboard and eventData[1] == "touch" and eventData[2] == screen then
+            if eventData[5] == 0 then
+                biosmenu()
+            else
+                return false
+            end
+        end
+    end)
+end
+
+local mainbootaddress, mainbootfile = table.unpack(split(getDataPart(4), ";"))
+local mainboot = getDataPart(4) ~= ""
+setDataPart(4, "")
+
+::revalue::
+local bootaddress, bootfile = getDataPart(2), getDataPart(3)
+local anyBoot = (bootfile == "any") and #boots(bootaddress) > 0
+local anyBoot2 = (bootaddress == "any") and #boots() > 0
+
+if mainboot and isBoot(mainbootaddress, mainbootfile) then
+    bootTo(mainbootaddress, mainbootfile)
+elseif anyBoot or anyBoot2 then
+    local bootsFiles, files, addresses
+    if anyBoot2 then
+        bootsFiles, files, addresses = boots()
+    else
+        bootsFiles, files, addresses = boots(bootaddress)
+    end
+    if isControl and #bootsFiles > 1 then
+        local bootsfuncs = {}
+        for i = 1, #bootsFiles do
+            table_insert(bootsfuncs, function()
+                bootTo(addresses[i], files[i])
+            end)
+        end
+
+        menuPro("Select boot file", bootsFiles, bootsfuncs)
+    else
+        bootTo(addresses[1], files[1])
+    end
+elseif not isBoot(bootaddress, bootfile) then
+    status("Search for a bootable disk", 0.5)
+
+    for _, address in fsList() do
+        local proxy, setted = component.proxy(address), false
+
+        local function set(file)
+            if proxy.exists(file) then
+                status("Set as bootable: " .. getLabel(address, file))
+                setDataPart(2, address)
+                setDataPart(3, file)
+                setted = true
+                return true
+            end
+        end
+
+        if set("/boot/kernel/pipes") then
+            break
+        end
+
+        if screen and set("/OS.lua") then
+            break
+        else
+            if set("/init.lua") then
+                break
+            end
+        end
+
+        local path = "/boot/kernel/"
+        for _, file in ipairs(proxy.list(path) or {}) do
+            if set(path .. file) then
+                break
+            end
+        end
+
+        if setted then
+            break
+        end
+    end
+
+    if isBoot(getDataPart(2), getDataPart(3)) then
+        goto revalue
+    else
+        status("No bootable medium found", true, true)
+    end
+else
+    bootTo(bootaddress, bootfile)
+end
+
+goto respring
