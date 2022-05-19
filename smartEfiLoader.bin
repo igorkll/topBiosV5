@@ -1,3 +1,4 @@
+_G.smartEfi = true
 computer.pullSignal(0.1)
 computer.setArchitecture("Lua 5.3")
 
