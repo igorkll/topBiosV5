@@ -740,6 +740,7 @@ function checkPassword(skip)
             status("The Password Doesn't Fit", 1)
         end
     end
+    return true
 end
 if getDataPart(11) == "" then
     checkPassword()
