@@ -53,6 +53,28 @@ end
 
 local eeprom = component_list("eeprom")()
 
+function resetPalette()
+    local colors
+    if depth == 8 then
+        colors = 
+        {0x000000, 0x111111, 0x222222, 0x333333,
+        0x444444, 0x555555, 0x666666, 0x777777,
+        0x888888, 0x999999, 0xAAAAAA, 0xBBBBBB,
+        0xCCCCCC, 0xDDDDDD, 0xEEEEEE, 0xFFFFFF}
+    elseif depth == 4 then
+        colors = 
+        {0xFFFFFF, 0xF2B233, 0xE57FD8, 0x99B2F2,
+        0xFEFE6C, 0x7FCC19, 0xF2B2CC, 0x4C4C4C,
+        0x999999, 0x4C99B2, 0xB266E5, 0x3333FF,
+        0x9F664C, 0x57A64E, 0xFF3333, 0x000000}
+    end
+    if colors then
+        for i, v in ipairs(colors) do
+            gpu.setPaletteColor(i - 1, v)
+        end
+    end
+end
+
 --------------------------------------------functions
 
 function split(str, sep)
@@ -232,7 +254,6 @@ if not gpu or not screen then
     gpu = nil
     screen = nil
 end
-
 --------------------------------------------functions
 
 isControl = screen and (keyboard or (math.floor(device[screen].width) ~= 1))
@@ -247,6 +268,7 @@ function setResolution(rx2, ry2, depth2)
     setDataPart(5, tostring(rx))
     setDataPart(6, tostring(ry))
     setDataPart(7, tostring(depth))
+    resetPalette()
 end
 
 if screen then
@@ -277,7 +299,7 @@ end
 
 local mainback, mainfore
 local function refreshMain()
-    mainback, mainfore = selectColor(0xE1E1E1, 0xAAAAAA, true), selectColor(0x878787, 0x222222, false)
+    mainback, mainfore = selectColor(0xE1E1E1, 0xFFFFFF, true), selectColor(0x878787, 0x4C4C4C, false)
 end
 refreshMain()
 
@@ -306,7 +328,7 @@ function setTheme(num, splash)
         inputBack, inputFore = 0, 0xFFFFFF
         menuBack, menuFore, menuLogoBack, menuLogoFore = 0, 0xFFFFFF, 0xFFFFFF, 0
     elseif num == 4 then --cyan
-        statusBack, statusFore = selectColor(0x002b36, 0x333399), selectColor(0x8cb9c5, 0x336699)
+        statusBack, statusFore = selectColor(0x002b36, 0x3333FF), selectColor(0x8cb9c5, 0x4C99B2)
         inputBack, inputFore = statusBack, statusFore
         menuBack, menuFore, menuLogoBack, menuLogoFore = statusBack, statusFore, statusBack, 0xFFFFFF
     elseif num == 5 then --red
@@ -1170,26 +1192,34 @@ local function resolutions()
 end
 
 local function depths()
-    local num = math.floor(tonumber(getDataPart(7)))
-    if num == 4 then
-        num = 2
-    elseif num == 1 then
-        num = 3
-    else
-        num = 1
-    end
+    local num
+    local findFlag = true
     while true do
         local strs = {}
         local lDepths = {}
 
         local depthsName = {"8 Bits", "4 Bits", "1 Bit"}
         local depths = {8, 4, 1}
+
         for i = 1, #depths do
             if depths[i] <= maxDepth then
                 table_insert(strs, depthsName[i])
                 table_insert(lDepths, depths[i])
             end
         end
+
+        if findFlag then
+            findFlag = false
+
+            local current = math.floor(tonumber(getDataPart(7)))
+            for i = 1, #lDepths do
+                if lDepths[i] == current then
+                    num = i
+                    break
+                end
+            end
+        end
+
         table_insert(strs, "Back")
 
         num = menu("Select Depth", strs, num)
