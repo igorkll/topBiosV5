@@ -531,7 +531,7 @@ do
         mainmenu.l()
     end
 
-    if getDataPart(5) == "1" and (not screen or not checkPassword()) then
+    if rebootMode ~= "fast" and getDataPart(5) == "1" and (not screen or not checkPassword()) then --при fast reboot не будет спрашиваться пароль
         shutdown()
     end
 
