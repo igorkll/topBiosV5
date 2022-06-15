@@ -15,7 +15,7 @@
 
 biosname = "microBios"
 statusAllow = 1
-local init = function() error("no bootable medium found", 0) end
+local init
 do
     local type, True, deviceinfo = type, true, computer.getDeviceInfo() --type ипользуеться после загрузчи
 
@@ -585,16 +585,16 @@ do
 
     status("Boot To Drive " .. getLabel(bootaddress) .. " To File " .. file, 0xFFFFFF, a, a, 1)
 
-    local file, buffer = assert(bootfs.open(file, "rb")), ""
+    local file2, buffer = assert(bootfs.open(file, "rb")), ""
     while 1 do
-        local read = bootfs.read(file, math.huge)
+        local read = bootfs.read(file2, math.huge)
         if not read then break end
         buffer = buffer .. read
     end
-    bootfs.close(file)
+    bootfs.close(file2)
 
     if file == "/OS.lua" then
-        eeprom.getData = function() --подменяю proxy а не invoke потому что там изменения откатяться после загрузки и mineOS получит реальный eeprom-data после загрузки
+        eeprom.getData = function() --подменяю proxy а не invoke потому что тогда изменения откатяться после загрузки(не работает) и mineOS получит реальный eeprom-data(только через invoke) после загрузки
             return bootaddress
         end
     end
